@@ -1,5 +1,5 @@
-binned_data/
 corpora/
+binned_data/
 *.bin
 *.pt
 *.safetensors
