@@ -1,0 +1,10 @@
+binned_data/
+corpora/
+*.bin
+*.pt
+*.safetensors
+*.pkl
+*.log
+*.csv
+evaluation/blimp_zorro_scores/
+evaluation/clm_semantic/

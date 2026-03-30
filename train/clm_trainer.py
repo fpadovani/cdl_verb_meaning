@@ -1,0 +1,466 @@
+import os
+import argparse
+from torch.nn import CrossEntropyLoss
+import logging
+from pathlib import Path
+from wrapper import *
+from create_dataset_splits import *
+import torch.nn.functional as F
+import numpy as np
+import datasets
+import torch
+from accelerate import Accelerator
+from accelerate.logging import get_logger
+from logging.handlers import RotatingFileHandler
+from accelerate.utils import set_seed
+from datasets import load_dataset
+from huggingface_hub import HfApi
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+from torch.optim import AdamW
+import transformers
+from transformers import (
+    GPT2LMHeadModel,
+    CONFIG_MAPPING,
+    MODEL_MAPPING,
+    TrainerCallback,
+    EarlyStoppingCallback,
+    RobertaTokenizerFast,
+    AutoTokenizer,
+    SchedulerType,
+    Trainer, 
+    TrainingArguments,
+    DataCollatorForLanguageModeling,
+    default_data_collator,
+    get_scheduler,
+)
+from transformers.utils import check_min_version, send_example_telemetry
+from transformers.utils.versions import require_version
+from utils.utils import *
+from custom_functions import *
+
+
+# Will error if the minimal version of Transformers is not installed. Remove at your own risks.
+
+
+# Create a logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Create a file handler with rotation
+file_handler = RotatingFileHandler('training.log', maxBytes=5*1024*1024, backupCount=5)
+file_handler.setLevel(logging.INFO)
+
+# Create a formatter and add it to the handler
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+
+# Add the handler to the logger
+if not logger.handlers:  # Avoid adding handlers multiple times
+    logger.addHandler(file_handler)
+
+
+# Configure basic logging for all processes (console output)
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    datefmt="%m/%d/%Y %H:%M:%S",
+    level=logging.INFO,
+)
+
+require_version("datasets>=2.14.0", "To fix: pip install -r examples/pytorch/language-modeling/requirements.txt")
+
+MODEL_CONFIG_CLASSES = list(MODEL_MAPPING.keys())
+MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Finetune a transformers model on a causal language modeling task")
+
+    parser.add_argument(
+        "--report_to",
+        type=str,
+        default="all",
+        help='The integration to report the results and logs to (e.g., "wandb").',
+    )
+
+    parser.add_argument(
+        '--wandb_project',
+        type=str,
+        required=True,
+        help='Provide the name for the wandb project'
+    )
+
+    parser.add_argument(
+        "--tokenizer_name",
+        type=str,
+        required=True,
+        help="Pretrained tokenizer name or path."
+    )
+
+    parser.add_argument(
+        "--with_tracking",
+        action="store_true",
+        help="Whether to enable experiment trackers for logging.",
+    )
+
+    parser.add_argument(
+        "--per_device_train_batch_size",
+        type=int,
+        default=8,
+        help="Batch size (per device) for the training dataloader.",
+    )
+
+    parser.add_argument(
+        "--per_device_eval_batch_size",
+        type=int,
+        default=8,
+        help="Batch size (per device) for the evaluation dataloader.",
+    )
+
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=5e-5,
+        help="Initial learning rate to use.",
+    )
+
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=0.0,
+        help="Weight decay to use.",
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="A seed for reproducible training.",
+    )
+
+    parser.add_argument(
+        "--vocab_size",
+        type=int,
+        required=True,
+        help="Vocabulary size of the tokenizer.",
+    )
+
+    parser.add_argument(
+        "--lr_scheduler_type",
+        type=str,
+        default="linear",
+        choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
+        help="The scheduler type to use.",
+    )
+
+    parser.add_argument(
+        "--num_warmup_steps",
+        type=int,
+        default=0,
+        help="Number of steps for the warmup in the lr scheduler.",
+    )
+
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help="Number of update steps to accumulate before a backward pass.",
+    )
+
+    parser.add_argument(
+        "--push_to_hub",
+        action="store_true",
+        help="Whether or not to push the model to the Hugging Face Hub.",
+    )
+
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        required=True,
+        help="Where to store the final model.",
+    )
+
+    parser.add_argument(
+        "--model_type",
+        type=str,
+        choices=["gpt2"],  # Add more if needed
+        required=True,
+        help="Model type to use if training from scratch.",
+    )
+
+    parser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        help="Whether to trust code from the Hub.",
+    )
+
+    parser.add_argument(
+        "--dataset_folder",
+        type=str,
+        required=True,
+        help="Folder in which the dataset splits are stored.",
+    )
+
+    parser.add_argument(
+        "--context_length",
+        type=int,
+        required=True,
+        help="Context length for model input.",
+    )
+
+    parser.add_argument(
+        "--language",
+        type=str,
+        required=True,
+        help="The target language of the model.",
+    )
+
+    parser.add_argument(
+        "--validation_type",
+        type=str,
+        choices=["validation", "validation_ctc"],
+        required=True,
+        help="Choose between 'validation' (for Wikipedia) or 'validation_ctc' (for CHILDES).",
+    )
+
+    parser.add_argument(
+        "--order",
+        type=str,
+        required=True,
+        help="Provide an order label for the dataset (e.g., wikipedia_fr).",
+    )
+
+    parser.add_argument(
+        "--input_file",
+        type=str,
+        required=True,
+        help="Path to the input training file.",
+    )
+
+    parser.add_argument(
+        "--hub_model_id", type=str, help="The name of the repository to keep in sync with the local `output_dir`."
+    )
+
+    parser.add_argument("--hub_token", type=str, help="The token to use to push to the Model Hub.")
+
+    return parser.parse_args()
+
+
+def main():
+    device = 'mps' if torch.backends.mps.is_available() else ('cuda' if torch.cuda.is_available() else 'cpu')
+
+    args = parse_args()
+    val_log_file = os.path.join(args.output_dir, "validation_batches.log")
+
+    send_example_telemetry("run_clm_no_trainer", args)
+    os.environ["WANDB_PROJECT"] = args.wandb_project
+
+    accelerator_log_kwargs = {}
+
+    if args.with_tracking:
+        accelerator_log_kwargs["log_with"] = args.report_to
+        accelerator_log_kwargs["project_dir"] = args.output_dir
+
+    accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps, **accelerator_log_kwargs)
+    
+    logger.info(f"Accelerator state: {accelerator.state}")
+    
+    if accelerator.is_local_main_process:
+        datasets.utils.logging.set_verbosity_warning()
+        transformers.utils.logging.set_verbosity_info()
+    else:
+        datasets.utils.logging.set_verbosity_error()
+        transformers.utils.logging.set_verbosity_error()
+
+    # If passed along, set the training seed now.
+    if args.seed is not None:
+        set_seed(args.seed)
+
+    # Handle the repository creation
+    if accelerator.is_main_process:
+        if args.push_to_hub:
+            # Retrieve of infer repo_name
+            repo_name = args.hub_model_id + '_' + str(args.seed)
+            if repo_name is None:
+                if args.language:
+                    repo_name = args.output_dir.split("/")[-1] + '_' + args.language + str(args.vocab_size)
+                else:
+                    repo_name = args.output_dir.split("/")[-1]
+            # Create repo and retrieve repo_id
+            api = HfApi()
+            repo_id = api.create_repo(repo_name, exist_ok=True, token=args.hub_token).repo_id
+
+            with open(os.path.join(args.output_dir, ".gitignore"), "w+") as gitignore:
+                if "step_*" not in gitignore:
+                    gitignore.write("step_*\n")
+                if "epoch_*" not in gitignore:
+                    gitignore.write("epoch_*\n")
+        elif args.output_dir is not None:
+            os.makedirs(args.output_dir, exist_ok=True)
+    accelerator.wait_for_everyone()
+
+
+    
+    dataset_folder = args.input_file
+
+    data_files = {
+    "train": os.path.join(dataset_folder, dataset_folder.split('/')[-1].lower() + ".train.txt"),
+    "validation": os.path.join(dataset_folder, dataset_folder.split('/')[-1].lower()+  ".dev.txt"),
+    #"test": os.path.join(dataset_folder, dataset_folder.split('/')[-1].lower()+ ".test.txt")
+}
+
+    raw_dataset_final = load_dataset("text", data_files=data_files)
+    
+    remove_columns = raw_dataset_final["train"].column_names
+    
+
+
+    if os.path.exists(args.tokenizer_name):
+        print(f"Tokenizer folder '{args.tokenizer_name}' exists.")
+        tokenizer = PreTrainedTokenizerFast(tokenizer_file=args.tokenizer_name, 
+                                            bos_token="<s>",
+                                            eos_token="</s>",
+                                            pad_token="<pad>",
+                                            unk_token="<unk>",
+                                            mask_token="<mask>",
+                                            sep_token="<sep>" )
+                                                
+                
+    else:
+        tokenizer = train_unified_tokenizer(args.input_file, save_path=args.tokenizer_name)
+
+
+
+
+    concat_all_sentences = True
+    minimal_sentence_length = 0
+    maximal_sentence_length = args.context_length
+
+    def lowercase_examples(examples):
+        return {
+            key: [sentence.lower() for sentence in examples[key]]
+            for key in examples.keys()
+        }
+
+    # First, lowercase all sentences
+    lowercased_datasets = raw_dataset_final.map(
+        lowercase_examples,
+        batched=True
+    )
+
+    with accelerator.main_process_first():
+        tokenized_datasets = lowercased_datasets.map(
+        tokenize_wrapper_controlled(
+            tokenizer,
+            concat_all_sentences=concat_all_sentences,
+            minimal_sentence_length=minimal_sentence_length,
+            maximal_sentence_length=maximal_sentence_length,
+        ),
+        batched=True,
+        remove_columns= remove_columns
+    )
+        
+    if args.order in ['wikipedia', 'wikipedia_fr', 'wikipedia_de']:
+        train_dataset = tokenized_datasets['train']
+        valid_dataset = tokenized_datasets['validation']
+    
+    else:
+        train_dataset = tokenized_datasets["train"]
+        valid_dataset = tokenized_datasets[args.validation_type]
+        
+
+    tokenizer.pad_token = tokenizer.eos_token
+    data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
+
+    from transformers import GPT2Config
+    config = GPT2Config(
+    vocab_size=len(tokenizer.get_vocab()),
+    n_positions=1024,
+    n_ctx=1024,
+    n_embd=768,
+    n_layer=12,
+    n_head=12
+    )
+
+
+    config.bos_token_id = tokenizer.bos_token_id
+    config.eos_token_id = tokenizer.eos_token_id
+
+    model = GPT2LMHeadModel(config)
+    model_size = sum(t.numel() for t in model.parameters())
+    print(f"GPT-2 size: {model_size/1000**2:.1f}M parameters")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device)
+
+
+    num_gpus = torch.cuda.device_count()
+    effective_batch_size = args.per_device_train_batch_size * num_gpus * args.gradient_accumulation_steps
+    print('Num of GPU available: ', num_gpus)
+    print('Effective batch size: ', effective_batch_size)
+
+    optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    num_training_steps = len(train_dataset) // (args.per_device_train_batch_size * args.gradient_accumulation_steps) * 20  # 20 epochs
+    scheduler = get_scheduler(
+    name='linear',
+    optimizer=optimizer,
+    num_warmup_steps=500,
+    num_training_steps=num_training_steps
+)
+    validation_logging_callback = ValidationLoggingCallback(val_log_file, tokenizer)
+
+    args = TrainingArguments(
+        output_dir=args.output_dir,
+        per_device_train_batch_size=args.per_device_train_batch_size,
+        per_device_eval_batch_size=args.per_device_eval_batch_size,
+        eval_strategy="epoch",
+        logging_strategy="epoch",
+        seed=args.seed,
+        logging_first_step=True,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        warmup_steps=500,
+        weight_decay=args.weight_decay,
+        learning_rate=args.learning_rate,
+        report_to="wandb",
+        save_strategy="epoch",
+        #save_steps=500,
+        run_name = args.output_dir.split('/')[-1],
+        use_mps_device=False,
+        fp16=True,
+        push_to_hub=True,
+        load_best_model_at_end=False,
+        hub_strategy="all_checkpoints",
+        metric_for_best_model="eval_loss",
+        hub_token=args.hub_token,
+        num_train_epochs=20
+        )
+    
+    checkpoint_steps = compute_log_checkpoints(num_training_steps, num_checkpoints=20)
+    
+    trainer = Trainer(
+    model=model,
+    tokenizer=tokenizer,
+    args=args,
+    optimizers=(optimizer,scheduler),
+    callbacks=[validation_logging_callback,LossLoggingCallback(), CustomCheckpointCallback(args.output_dir, checkpoint_steps, push_to_hub=True,repo_id=repo_id, hub_token=args.hub_token)],
+    data_collator=data_collator,
+    train_dataset=train_dataset,
+    eval_dataset=valid_dataset)
+
+    trainer.train()
+
+    trainer.save_model(args.output_dir)
+    import shutil
+
+    # --- DELETE LOCAL REPOSITORY (output_dir) ---
+    try:
+        shutil.rmtree(args.output_dir)
+        print(f"Deleted local repository: {args.output_dir}")
+    except Exception as e:
+        print(f"Could not delete {args.output_dir}: {e}")
+    
+
+
+
+if __name__ == "__main__":
+    main()
