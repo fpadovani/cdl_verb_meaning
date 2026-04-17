@@ -41,7 +41,60 @@ Three manipulated versions of each corpus can then be generated using the follow
 - **Shuffle Order — NP-level** (`generate_experimental_conditions/shuffle_order_np.ipynb`): shuffles word order while preserving the internal structure of noun phrases, following [Zhu et al. (2025)](https://arxiv.org/abs/2508.12482).
 
 
-## Model Training 
+## Model Training
 
+Models are trained as causal language models (GPT-2) across 5 random seeds. Below is an example training command for the CHILDES `replace_word` condition:
 
-## Evaluation 
+```bash
+for seed in 13 42 30 51 67; do
+    CUDA_VISIBLE_DEVICES=1 python ./train/clm_trainer.py \
+        --wandb_project sy-optimized \
+        --tokenizer_name ./tokenizers/english/childes/childes_rand_tokenizer_new.json \
+        --with_tracking \
+        --per_device_train_batch_size 256 \
+        --per_device_eval_batch_size 256 \
+        --learning_rate 1e-4 \
+        --weight_decay 0.01 \
+        --seed $seed \
+        --vocab_size 30000 \
+        --lr_scheduler_type linear \
+        --num_warmup_steps 0 \
+        --gradient_accumulation_steps 1 \
+        --push_to_hub \
+        --output_dir ./model_trained/cds_w_$seed \
+        --model_type gpt2 \
+        --trust_remote_code \
+        --dataset_folder ./datasets \
+        --context_length 128 \
+        --language en \
+        --validation_type validation \
+        --order random \
+        --input_file ./corpora/english/CHILDES_rand/replace_word \
+        --hub_model_id cds_w \
+        --hub_token <your_huggingface_token>
+done
+```
+
+Adjust `--input_file`, `--output_dir`, `--hub_model_id`, and `--tokenizer_name` for each corpus and condition.
+
+## Evaluation
+
+### Semantic Minimal Pairs
+
+Corpus-specific semantic minimal pairs used for the verb meaning evaluation can be generated using:
+
+```bash
+jupyter notebook evaluation/clm_semantic/data/generate_minpairs.ipynb
+```
+
+Pre-generated minimal pairs for each corpus are already available under `evaluation/clm_semantic/data/verb_focus/`.
+
+### Running All Evaluations
+
+To run a comprehensive evaluation of semantic and syntactic minimal pairs across all test suites (Zorro, BLiMP, and Fit-CLAMS) for all models, use:
+
+```bash
+python evaluation/semantic_minimal_pairs/run_all_evaluations.py
+```
+
+This script covers all three datasets and all trained models across conditions.
