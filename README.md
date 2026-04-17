@@ -29,7 +29,7 @@ The experiments use four corpora: **CHILDES**, **Wikipedia**, **CANDOR**, and **
 Once all corpora are in place, run the notebook to clean the data and generate the train, dev, and test splits for each corpus:
 
 ```bash
-jupyter notebook generate_experimental_conditions/prepare_data.ipynb
+generate_experimental_conditions/prepare_data.ipynb
 ```
 
 ### Generating Experimental Conditions
