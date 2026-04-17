@@ -7,4 +7,3 @@ binned_data/
 *.log
 *.csv
 evaluation/blimp_zorro_scores/
-evaluation/clm_semantic/

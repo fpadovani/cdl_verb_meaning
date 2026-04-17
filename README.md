@@ -43,6 +43,12 @@ Three manipulated versions of each corpus can then be generated using the follow
 
 ## Model Training
 
+Before training, a tokenizer must be trained for each corpus using:
+
+```bash
+jupyter notebook train/train_tokenizer.ipynb
+```
+
 Models are trained as causal language models (GPT-2) across 5 random seeds. Below is an example training command for the CHILDES `replace_word` condition:
 
 ```bash
@@ -84,10 +90,12 @@ Adjust `--input_file`, `--output_dir`, `--hub_model_id`, and `--tokenizer_name` 
 Corpus-specific semantic minimal pairs used for the verb meaning evaluation can be generated using:
 
 ```bash
-jupyter notebook evaluation/clm_semantic/data/generate_minpairs.ipynb
+jupyter notebook evaluation/semantic_minimal_pairs/data/generate_minpairs.ipynb
 ```
 
 Pre-generated minimal pairs for each corpus are already available under `evaluation/clm_semantic/data/verb_focus/`.
+
+To generate the domain-specific (BNC and CANDOR) versions of FIT-CLAMS, follow the procedure described in the [childes_vs_wiki repository](https://github.com/fpadovani/childes_vs_wiki).
 
 ### Running All Evaluations
 
