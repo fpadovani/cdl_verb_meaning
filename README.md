@@ -106,3 +106,7 @@ python evaluation/semantic_minimal_pairs/run_all_evaluations.py
 ```
 
 This script covers all three datasets and all trained models across conditions.
+
+The final minimal pair CSV, including a `bin` column indicating the frequency bin each verb falls into, can be found in `evaluation/semantic_minimal_pairs/data/verb_final_csv/`.
+
+To generate the plots used in the paper, use the notebook `evaluation/blimp_zorro_scores/plots_paper_final.ipynb`.
